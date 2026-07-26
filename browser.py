@@ -57,7 +57,9 @@ SEARCH_BUTTON_SELECTOR = 'button#searchbox-searchbutton'
 
 # Results panel selectors.
 RESULTS_FEED_SELECTOR = 'div[role="feed"]'
-RESULT_ITEM_SELECTOR = 'div[role="feed"] a.hfpxzc'
+RESULT_ITEM_SELECTOR = (
+    'div[role="feed"] a[href*="maps"]'
+)
 
 # Selector used to confirm a business detail pane has loaded after a click.
 BUSINESS_NAME_SELECTOR = "h1.DUwDvf"
@@ -235,11 +237,12 @@ class BrowserAgent:
         if max_results <= 0:
             return 0
 
-        results_locator = self.page.locator(RESULT_ITEM_SELECTOR)
+        # results_locator = self.page.locator(RESULT_ITEM_SELECTOR)
         previous_count = 0
         stagnant_rounds = 0
 
         while stagnant_rounds < _MAX_STAGNANT_SCROLLS:
+            results_locator = self.page.locator(RESULT_ITEM_SELECTOR)
             current_count = results_locator.count()
 
             if current_count >= max_results:
@@ -265,29 +268,42 @@ class BrowserAgent:
         return min(final_count, max_results)
 
     def open_result(self, index: int) -> bool:
-        """Open a business result by index and wait for its detail pane.
-
-        Args:
-            index: Zero-based index of the result item to open.
-
-        Returns:
-            True if the business detail pane loaded successfully, False
-            if the click or load timed out.
-
-        Raises:
-            RuntimeError: If the browser has not been launched.
-        """
         if self.page is None:
-            raise RuntimeError("Browser has not been launched. Call launch() first.")
+            raise RuntimeError("Browser has not been launched.")
 
-        try:
-            self.page.locator(RESULT_ITEM_SELECTOR).nth(index).click(
-                timeout=self.search_timeout
-            )
-            self.page.wait_for_selector(BUSINESS_NAME_SELECTOR, timeout=self.search_timeout)
-            return True
-        except (PlaywrightTimeoutError, PlaywrightError):
-            return False
+        for attempt in range(3):
+            try:
+                results = self.page.locator(RESULT_ITEM_SELECTOR)
+
+                if index >= results.count():
+                    return False
+
+                result = results.nth(index)
+
+                result.scroll_into_view_if_needed()
+
+                result.wait_for(
+                    state="visible",
+                    timeout=5000,
+                )
+
+                result.click(
+                    timeout=5000,
+                    force=True,
+                )
+
+                self.page.wait_for_selector(
+                    BUSINESS_NAME_SELECTOR,
+                    timeout=self.search_timeout,
+                )
+
+                return True
+
+            except (PlaywrightTimeoutError, PlaywrightError):
+
+                self.page.wait_for_timeout(1000)
+
+        return False
 
     def close(self) -> None:
         """Close the browser and clean up Playwright resources.

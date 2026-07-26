@@ -2,7 +2,7 @@
 
 Prompts the user for a natural language search query, runs the full agent
 workflow (search, scrape, email discovery, Excel export), and prints a
-final summary.
+detailed final summary.
 """
 
 from agent import LeadGenerationAgent, RunResult
@@ -12,24 +12,24 @@ logger = configure_logging()
 
 
 def print_summary(result: RunResult) -> None:
-    """Print a clean final summary of the lead generation run.
+    """Print a detailed final summary of the lead generation run.
 
     Args:
         result: The RunResult produced by LeadGenerationAgent.run().
     """
     print("\n" + "=" * 40)
-    print("Lead Generation Complete")
+    print("Lead Generation Completed")
     print("=" * 40)
-    print(f"Search Query: {result.query.business_type.title()} in {result.query.location}")
-    print(f"Businesses Found: {len(result.leads)}")
-    print(f"Emails Found: {result.emails_found}")
-
-    if result.excel_path:
-        print(f"Excel File: {result.excel_path}")
-    else:
-        print("Excel File: (not saved - no leads collected or save failed)")
-
-    print("=" * 40)
+    print(f"\nQuery:\n{result.query.business_type.title()} in {result.query.location}")
+    print(f"\nBusinesses Processed:\n{result.businesses_processed}")
+    print(f"\nSuccessful:\n{result.successful}")
+    print(f"\nSkipped:\n{result.skipped}")
+    print(f"\nEmails Found:\n{result.emails_found}")
+    print(f"\nPhone Numbers:\n{result.phones_found}")
+    print(f"\nWebsites:\n{result.websites_found}")
+    print(f"\nExcel File:\n{result.excel_path or '(not saved - no leads collected or save failed)'}")
+    print(f"\nExecution Time:\n{result.execution_time_seconds} seconds")
+    print("\n" + "=" * 40)
 
 
 def main() -> None:

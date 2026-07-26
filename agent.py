@@ -1,11 +1,14 @@
 """Core orchestration logic for the Lead Generation Agent.
 
 Coordinates prompt parsing, browser automation, scraping (including email
-discovery), and Excel export to produce a complete lead-generation run for
-a given natural language prompt.
+discovery), and Excel export. Tracks detailed run statistics (successful
+vs. skipped businesses, field discovery counts, execution time) and prints
+step-by-step progress so failures are easy to diagnose without stopping
+the overall run.
 """
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
 import config
 from browser import BrowserAgent
@@ -25,27 +28,30 @@ class RunResult:
     Attributes:
         query: The parsed search query.
         leads: All successfully collected leads.
+        businesses_processed: Total number of business results attempted.
+        successful: Number of businesses successfully opened and scraped.
+        skipped: Number of businesses that could not be opened after retries.
         emails_found: Count of leads with a non-empty email address.
-        excel_path: Path to the saved Excel file, or None if export was
-            skipped (e.g. because no leads were collected).
+        phones_found: Count of leads with a non-empty phone number.
+        websites_found: Count of leads with a non-empty website.
+        excel_path: Path to the saved Excel file, or None if not saved.
+        execution_time_seconds: Total wall-clock time for the run.
     """
 
     query: SearchQuery
-    leads: list[Lead]
-    emails_found: int
-    excel_path: str | None
+    leads: list[Lead] = field(default_factory=list)
+    businesses_processed: int = 0
+    successful: int = 0
+    skipped: int = 0
+    emails_found: int = 0
+    phones_found: int = 0
+    websites_found: int = 0
+    excel_path: str | None = None
+    execution_time_seconds: float = 0.0
 
 
 class LeadGenerationAgent:
-    """Orchestrates the end-to-end lead generation workflow.
-
-    Workflow:
-        User Prompt -> PromptParser -> SearchQuery
-                    -> BrowserAgent (search + collect + open results)
-                    -> BusinessScraper (extract details + email)
-                    -> list[Lead]
-                    -> ExcelExporter -> RunResult (summary)
-    """
+    """Orchestrates the end-to-end lead generation workflow."""
 
     def __init__(self) -> None:
         """Initialize the agent's parser, scraper, and exporter."""
@@ -74,15 +80,18 @@ class LeadGenerationAgent:
         Returns:
             The number of business results available to scrape.
         """
+        logger.info("Searching Google Maps...")
         search_text = f"{query.business_type} {query.location}"
         browser.search(search_text)
+
+        logger.info("Loading businesses...")
         return browser.collect_businesses(max_results=config.MAX_LEADS)
 
     def scrape_business(self, browser: BrowserAgent, index: int, location: str) -> Lead | None:
         """Open a single business result and scrape its details (incl. email).
 
-        Any failure while opening or scraping a single result is logged
-        and treated as a skipped result; it never stops the overall run.
+        Any failure is logged and treated as a skipped result; it never
+        stops the overall run.
 
         Args:
             browser: An already-launched BrowserAgent with active results.
@@ -96,7 +105,6 @@ class LeadGenerationAgent:
         try:
             opened = browser.open_result(index)
             if not opened:
-                logger.warning("Could not open business result at index %d.", index)
                 return None
             return self.scraper.scrape(browser.page, location)
         except Exception as exc:  # noqa: BLE001 - never let one bad result stop the run
@@ -126,40 +134,51 @@ class LeadGenerationAgent:
             prompt: The raw natural language prompt from the user.
 
         Returns:
-            A RunResult summarizing the query, collected leads, email
-            discovery count, and the saved Excel file path.
+            A RunResult summarizing the query, collected leads, and stats.
 
         Raises:
             ValueError: If the prompt cannot be parsed.
         """
+        start_time = time.perf_counter()
         query = self.parse_prompt(prompt)
 
+        result = RunResult(query=query)
         browser = BrowserAgent(headless=config.HEADLESS, search_timeout=config.SEARCH_TIMEOUT)
-        leads: list[Lead] = []
 
         try:
+            logger.info("Launching browser...")
             browser.launch()
+
             result_count = self.search_businesses(browser, query)
+            result.businesses_processed = result_count
 
             for index in range(result_count):
+                logger.info("Business %d/%d", index + 1, result_count)
                 lead = self.scrape_business(browser, index, query.location)
-                if lead is not None:
-                    leads.append(lead)
+
+                if lead is None:
+                    result.skipped += 1
+                    logger.warning("\u2717 Skipped\n" + "-" * 23)
+                    continue
+
+                result.leads.append(lead)
+                result.successful += 1
+                if lead.email:
+                    result.emails_found += 1
+                if lead.phone_number:
+                    result.phones_found += 1
+                if lead.website:
+                    result.websites_found += 1
+                logger.info("\u2713 Success\n" + "-" * 23)
+
         except (TimeoutError, RuntimeError) as exc:
             logger.error("Browser automation failed: %s", exc)
         finally:
             browser.close()
 
-        emails_found = sum(1 for lead in leads if lead.email)
-
-        excel_path: str | None = None
-        if leads:
+        if result.leads:
             filename = f"leads_{sanitize_filename(query.business_type)}"
-            excel_path = self.save_to_excel(leads, filename)
+            result.excel_path = self.save_to_excel(result.leads, filename)
 
-        return RunResult(
-            query=query,
-            leads=leads,
-            emails_found=emails_found,
-            excel_path=excel_path,
-        )
+        result.execution_time_seconds = round(time.perf_counter() - start_time, 1)
+        return result

@@ -2,86 +2,65 @@
 
 An AI-powered agent that accepts a natural language prompt (e.g. *"Find coffee
 shops in Karachi"*), extracts the business category and location, uses
-browser automation to search Google Maps, scrapes business details, discovers
-contact emails, and exports everything to an Excel file.
+browser automation to search Google Maps, scrapes business details,
+discovers contact emails, and exports everything to a formatted Excel file.
 
+## Architecture
+```
+User Prompt
+|
+v
+PromptParser ----> SearchQuery(business_type, location)
+|
+v
+BrowserAgent (Playwright/Chromium)
+| launch -> search -> collect_businesses -> open_result (with retries)
+v
+BusinessScraper
+| scrape Google Maps fields -> visit website -> extract_email (with retries)
+v
+list[Lead]
+|
+v
+ExcelExporter ----> output/leads_<business_type>.xlsx
+|
+v
+RunResult (stats) ----> console summary
+```
 ## Features
 
-- **Natural language prompt parsing** — extracts business type and location
-  from prompts like `"Find coffee shops in Karachi"`.
-- **Browser automation** — Playwright-driven Chromium session, headless or
-  visible.
-- **Google Maps search** — searches and scrolls the results feed to collect
-  multiple businesses per run.
-- **Business scraping** — extracts business name, phone number, website, and
-  address from each result.
+- **Natural language prompt parsing** — extracts business type and location.
+- **Browser automation** — Playwright-driven Chromium, headless or visible.
+- **Google Maps search** — scrolls the results feed to collect multiple
+  businesses per run.
+- **Reliable navigation** — each business result is scrolled into view,
+  waited on, clicked, and confirmed to have actually loaded new content
+  before scraping; failures are retried automatically.
+- **Stable selectors** — primarily role/aria-label/accessible-name based,
+  with generated-class-name fallbacks kept to a minimum.
 - **Email extraction** — visits each business's website (homepage plus
-  contact/about pages) and searches for a contact email address using a
-  regular expression.
-- **Excel export** — saves all collected leads to a `.xlsx` file with
-  auto-sized columns.
-- **Error handling** — missing fields, unreachable websites, timeouts, or a
-  single failed business never stop the overall run.
-
-## Project Structure
-```
-lead-generation-agent/
-├── main.py # CLI entry point
-├── agent.py # LeadGenerationAgent orchestration class
-├── parser.py # PromptParser: extracts business type + location
-├── models.py # SearchQuery and Lead dataclasses
-├── config.py # Environment variable configuration
-├── browser.py # BrowserAgent: Playwright/Google Maps automation
-├── scraper.py # BusinessScraper: extracts lead details
-├── excel_export.py # Excel export (stub, future stage)
-├── utils.py # Generic helpers (filenames, logging, timestamps)
-├── output/ # Generated Excel files will be saved here
-│ └── .gitkeep
-├── README.md
-├── requirements.txt
-├── .env.example
-└── .gitignore
-```
+  contact/about pages), retrying transient network failures.
+- **Excel export** — bold + frozen header row, auto-filter, auto-sized
+  columns, true blank cells for missing data, full Unicode support.
+- **Detailed summary & logging** — per-business progress, retry warnings,
+  and a final report with success/skip counts and execution time.
+- **Resilient by design** — a single failed business, website, or email
+  lookup never stops the rest of the run; the browser always closes and
+  the Excel file always attempts to save.
 
 ## Installation
 
-### 1. Clone or download the project
-
 ```bash
 cd lead-generation-agent
-```
-
-### 2. Create and activate a virtual environment
-
-**macOS / Linux:**
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
-**Windows:**
-
-```bash
 python -m venv venv
+
+# Windows
 venv\Scripts\activate
-```
+# macOS / Linux
+source venv/bin/activate
 
-### 3. Install dependencies
-
-```bash
 pip install -r requirements.txt
-```
-
-### 4. Install Playwright's browser binaries
-
-```bash
 playwright install
-```
-
-### 5. Configure environment variables
-
-```bash
 cp .env.example .env
 ```
 
@@ -90,80 +69,111 @@ cp .env.example .env
 | Variable            | Description                                                   | Default  |
 |---------------------|-----------------------------------------------------------------|----------|
 | `HEADLESS`          | Run Chromium without a visible window (`true`/`false`)          | `true`   |
-| `MAX_LEADS`         | Maximum number of businesses to collect per search                | `20`     |
-| `SEARCH_TIMEOUT`    | Timeout in milliseconds for page loads/selectors                  | `15000`  |
-| `EMAIL_TIMEOUT`     | Timeout in seconds for each website request during email search   | `8`      |
-| `MAX_CONTACT_PAGES` | Max additional contact/about pages checked per website             | `4`      |
-| `OUTPUT_DIRECTORY`  | Folder where Excel files are saved                                 | `output` |
+| `MAX_LEADS`         | Maximum businesses to collect per search                           | `20`     |
+| `SEARCH_TIMEOUT`    | Timeout (ms) for page loads/selectors                              | `30000`  |
+| `MAX_RETRIES`       | Retry attempts for opening businesses, websites, and emails          | `3`      |
+| `RETRY_WAIT_MS`     | Wait (ms) between retry attempts                                     | `800`    |
+| `EMAIL_TIMEOUT`     | Timeout (seconds) per website request during email search           | `8`      |
+| `MAX_CONTACT_PAGES` | Max additional contact/about pages checked per website               | `4`      |
+| `OUTPUT_DIRECTORY`  | Folder where Excel files are saved                                   | `output` |
 
-## Running the Project
+## Running
 
 ```bash
 python main.py
 ```
-
-Enter a prompt when asked:
 Enter a search query, e.g. 'Find coffee shops in Karachi'
 
-Find coffee shops in Karachi
+Find gyms in Karachi
 
 
-The agent will parse the prompt, search Google Maps, collect businesses,
-attempt to find each one's contact email, save an Excel file, and print a
-summary:
-```
+### Sample Output
+Launching browser...
+Searching Google Maps...
+Loading businesses...
+Business 1/20
+Extracting details...
+Extracting website...
+Searching for email...
+✓ Success
+
+Business 2/20
+...
 ========================================
-Lead Generation Complete
-Search Query: Coffee Shops in Karachi
-Businesses Found: 18
-Emails Found: 11
-Excel File: output/leads_coffee_shops.xlsx
+Lead Generation Completed
+
+Query:
+Gyms in Karachi
+
+Businesses Processed:
+20
+
+Successful:
+16
+
+Skipped:
+4
+
+Emails Found:
+13
+
+Phone Numbers:
+18
+
+Websites:
+15
+
+Excel File:
+output/leads_gyms.xlsx
+
+Execution Time:
+32.6 seconds
+
+========================================
+Excel files are saved in `output/` as `leads_<business_type>.xlsx` (e.g.
+`leads_gyms.xlsx`), with columns: **Business Name, Email, Phone Number,
+Website, Location**.
+
+## Limitations
+
+- **Google Maps DOM changes**: Google periodically restructures Maps' HTML
+  and generated CSS class names. Selectors here favor ARIA roles and
+  accessible names specifically to survive most such changes, but a few
+  (e.g. the website link's `data-item-id="authority"`) have no reliable
+  accessible-name alternative and may still break if Google changes them.
+  If scraping starts failing broadly, check `output/debug/search_timeout.png`
+  (auto-saved on a search timeout) first, then review the selector
+  constants at the top of `browser.py` and `scraper.py`.
+- **Rate limiting / CAPTCHAs**: Very large `MAX_LEADS` values or rapid
+  repeated runs may trigger Google's own rate limiting or a CAPTCHA
+  challenge, which this project does not attempt to solve or bypass.
+- **Email discovery is best-effort**: many small businesses simply don't
+  publish an email anywhere on their site, in which case the field is
+  correctly left blank rather than guessed.
+
+## Future Improvements
+
+- Support an alternate target site (e.g. Bing Maps) as a fallback when
+  Google Maps blocks or rate-limits a session.
+- LLM-based prompt parsing for more complex or ambiguous queries.
+- Parallel website/email lookups to reduce total execution time.
+- Optional CSV export alongside Excel.
+
+## Project Structure
 ```
-## Output
-
-Excel files are saved in the `output/` directory using the pattern:
-leads_<business_type>.xlsx
-
-
-Examples: `leads_coffee_shops.xlsx`, `leads_dentists.xlsx`,
-`leads_software_houses.xlsx`.
-
-Each file contains one row per lead with the columns: **Business Name,
-Email, Phone Number, Website, Location**.
-
-## Example Prompts
-
-- `Find coffee shops in Karachi`
-- `I need dentists in Chicago`
-- `Software houses in Lahore`
-- `Show me bakeries in New York`
-
-## Notes on Reliability
-
-- Google Maps' HTML structure changes periodically; selectors are
-  centralized at the top of `browser.py` and `scraper.py` for easy updates.
-- Email discovery uses plain HTTP requests (not Playwright) against each
-  business's homepage plus a small, bounded set of contact/about pages, so
-  a slow or unreachable website never blocks the browser session.
-- Any missing field (email, phone, website, address) is left as an empty
-  string; a failure on one business is logged and skipped without stopping
-  the rest of the run.
-
-## Assignment Requirements Checklist
-
-| Requirement | Status | Where it's implemented |
-|---|---|---|
-| Accepts a natural-language prompt describing lead type + location | ✅ | `main.py` CLI input, `parser.py` |
-| Extracts business category and location from the prompt | ✅ | `PromptParser.parse()` in `parser.py` |
-| Uses browser automation on a map/business listing site | ✅ | `BrowserAgent` in `browser.py` (Playwright + Google Maps) |
-| Searches based on parsed category + location | ✅ | `LeadGenerationAgent.search_businesses()` in `agent.py` |
-| Collects business name, email, phone, website | ✅ | `BusinessScraper.scrape()` in `scraper.py` |
-| Collects multiple leads, not just one | ✅ | `BrowserAgent.collect_businesses()` scrolls to load up to `MAX_LEADS` results |
-| Missing fields left blank instead of crashing | ✅ | All extraction helpers in `scraper.py` return `""` on failure; never raise |
-| Leads saved into an `.xlsx` file | ✅ | `ExcelExporter.export()` in `excel_export.py` |
-| Excel file has clear columns (Business Name, Email, Phone Number, Website, Location) | ✅ | `_COLUMN_HEADERS` in `excel_export.py` |
-| Meaningful, sanitized filename | ✅ | `leads_<business_type>.xlsx` via `sanitize_filename()` in `utils.py`, used in `agent.py` |
-| Prints a clear summary (query, lead count, file path) | ✅ | `print_summary()` in `main.py` |
-| Runs without runtime errors given valid setup | ✅ | Errors caught at every stage (parsing, browser, scraping, email fetch, Excel save) |
-| README explains install, config, running, and output location | ✅ | This file |
-| Complete source code, no generated dependency folders submitted | ✅ | `.gitignore` excludes `venv/`, `node_modules/`, `.env` |
+lead-generation-agent/
+├── main.py # CLI entry point + summary printing
+├── agent.py # LeadGenerationAgent orchestration + RunResult stats
+├── parser.py # PromptParser: extracts business type + location
+├── models.py # SearchQuery and Lead dataclasses
+├── config.py # Environment variable configuration
+├── browser.py # BrowserAgent: Playwright/Google Maps automation
+├── scraper.py # BusinessScraper: business details + email discovery
+├── excel_export.py # ExcelExporter: formatted .xlsx writer
+├── utils.py # Filenames, logging, timestamps, retry helper
+├── output/ # Generated Excel files + debug/ screenshots
+├── README.md
+├── requirements.txt
+├── .env.example
+└── .gitignore
+```

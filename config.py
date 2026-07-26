@@ -57,18 +57,20 @@ HEADLESS: bool = _get_bool("HEADLESS", True)
 
 # Maximum time (in milliseconds) to wait for browser actions/selectors
 # before treating the operation as failed/timed out.
-SEARCH_TIMEOUT: int = _get_int("SEARCH_TIMEOUT", 15000)
+SEARCH_TIMEOUT: int = _get_int("SEARCH_TIMEOUT", 30000)
 
 # Lead collection configuration.
 MAX_LEADS: int = _get_int("MAX_LEADS", 20)
 
-# Email extraction configuration.
-# EMAIL_TIMEOUT is in seconds (used with the `requests` library, unlike the
-# millisecond-based Playwright timeouts above).
-EMAIL_TIMEOUT: int = _get_int("EMAIL_TIMEOUT", 8)
+# Number of times to retry a flaky operation (opening a business result,
+# fetching a website, extracting an email) before giving up on it.
+MAX_RETRIES: int = _get_int("MAX_RETRIES", 3)
 
-# Maximum number of additional contact/about-style pages to check per
-# website (beyond the homepage) when searching for an email address.
+# Wait time (milliseconds) between retry attempts.
+RETRY_WAIT_MS: int = _get_int("RETRY_WAIT_MS", 800)
+
+# Email extraction configuration.
+EMAIL_TIMEOUT: int = _get_int("EMAIL_TIMEOUT", 8)
 MAX_CONTACT_PAGES: int = _get_int("MAX_CONTACT_PAGES", 4)
 
 # Output configuration. OUTPUT_DIRECTORY is the canonical name; OUTPUT_DIR

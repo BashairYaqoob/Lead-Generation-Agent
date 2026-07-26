@@ -1,14 +1,14 @@
 """Business data scraping from Google Maps detail panes, plus email discovery.
 
-Given a Playwright Page that currently has a business detail pane open
-(after `BrowserAgent.open_result()`), extracts the visible business name,
-phone number, website, and address into a `Lead`.
+Extracts business name, phone number, website, and address using
+ARIA-label/role-based locators where possible (more stable across Google
+Maps UI updates than generated CSS class names), falling back to
+`data-item-id` attributes when needed. Also visits each business's website
+(via plain HTTP requests, not Playwright) to search for a contact email
+address, with retries for transient network failures.
 
-Additionally, if a website URL is available, visits the homepage and a
-small set of likely contact/about pages (via plain HTTP requests, not
-Playwright) to search for a contact email address using a regular
-expression. Any failure (unreachable site, timeout, malformed HTML) is
-handled gracefully and simply results in an empty email field.
+Every extraction step degrades gracefully to an empty string on failure;
+this module never raises due to missing or unreachable data.
 """
 
 import re
@@ -20,26 +20,28 @@ from playwright.sync_api import Error as PlaywrightError, Page, TimeoutError as 
 
 import config
 from models import Lead
+from utils import configure_logging, retry
 
-NAME_SELECTOR = "h1.DUwDvf"
-ADDRESS_SELECTOR = 'button[data-item-id="address"]'
-PHONE_SELECTOR = 'button[data-item-id^="phone:tel:"]'
-WEBSITE_SELECTOR = 'a[data-item-id="authority"]'
+logger = configure_logging()
 
-# Timeout (milliseconds) for individual field extraction attempts. Kept
-# short since the detail pane is already loaded by the time we scrape it.
+# --- Detail pane field locators ------------------------------------------
+# Primary: aria-label based (accessible name), most stable.
+# Fallback: data-item-id attribute (Google-internal but has been stable
+# for years; used only if the aria-label lookup fails).
+_ADDRESS_ARIA_PATTERN = re.compile(r"^Address:")
+_PHONE_ARIA_PATTERN = re.compile(r"^Phone:")
+_ADDRESS_FALLBACK_SELECTOR = 'button[data-item-id="address"]'
+_PHONE_FALLBACK_SELECTOR = 'button[data-item-id^="phone:tel:"]'
+# FRAGILE: "authority" is a Google-internal data-item-id used to mark the
+# website link; there is no reliable aria-label alternative for this one.
+_WEBSITE_SELECTOR = 'a[data-item-id="authority"]'
+
 _FIELD_TIMEOUT_MS = 3000
 
-# Relative paths commonly used for contact/about information.
 _CANDIDATE_PATHS = ["", "contact", "contact-us", "about", "about-us"]
-
-# Keywords used to identify contact/about links discovered on a homepage.
 _CONTACT_LINK_KEYWORDS = ("contact", "about")
 
-# Matches standard email addresses (e.g. info@example.com).
 _EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-
-# A stricter pattern used to validate a single candidate string.
 _EMAIL_FULLMATCH_PATTERN = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 _REQUEST_HEADERS = {
@@ -56,23 +58,26 @@ class BusinessScraper:
     def scrape(self, page: Page, location: str) -> Lead:
         """Scrape the currently open business detail pane into a Lead.
 
-        Any field that cannot be found is left as an empty string; this
-        method never raises due to missing data. If a website is found,
-        it is also used to attempt email discovery.
-
         Args:
             page: The Playwright Page with a business detail pane open.
-            location: Fallback location (from the search query) used if
-                no address is extracted from the page.
+            location: Fallback location used if no address is found.
 
         Returns:
-            A populated Lead object.
+            A populated Lead object. Missing fields are left as "".
         """
-        name = self._extract_text(page, NAME_SELECTOR)
-        address = self._extract_attribute_or_text(page, ADDRESS_SELECTOR, "aria-label")
-        phone = self._extract_attribute_or_text(page, PHONE_SELECTOR, "aria-label")
-        website = self._extract_attribute(page, WEBSITE_SELECTOR, "href")
+        name = self._extract_heading(page)
+        address = self._extract_by_aria_or_fallback(
+            page, _ADDRESS_ARIA_PATTERN, _ADDRESS_FALLBACK_SELECTOR
+        )
+        phone = self._extract_by_aria_or_fallback(
+            page, _PHONE_ARIA_PATTERN, _PHONE_FALLBACK_SELECTOR
+        )
+        website = self._extract_attribute(page, _WEBSITE_SELECTOR, "href")
 
+        logger.info("Extracting details...")
+        if website:
+            logger.info("Extracting website...")
+            logger.info("Searching for email...")
         email = self.extract_email(website) if website else ""
 
         return Lead(
@@ -86,24 +91,21 @@ class BusinessScraper:
     # ------------------------------------------------------------------
     # Google Maps field extraction (Playwright)
     # ------------------------------------------------------------------
-
     @staticmethod
-    def _extract_text(page: Page, selector: str) -> str:
-        """Extract the text content of the first element matching selector.
-
-        Args:
-            page: The Playwright Page to search within.
-            selector: The CSS selector to locate the element.
-
-        Returns:
-            The trimmed text content, or an empty string if not found.
-        """
+    def _extract_heading(page: Page) -> str:
+        print(page.url)
         try:
-            locator = page.locator(selector).first
-            text = locator.text_content(timeout=_FIELD_TIMEOUT_MS)
-            return text.strip() if text else ""
+            headings = page.get_by_role("heading", level=1)
+
+            for i in range(headings.count()):
+                text = headings.nth(i).text_content(timeout=_FIELD_TIMEOUT_MS)
+
+                if text and text.strip() and text.strip().lower() != "results":
+                    return text.strip()
+
         except (PlaywrightTimeoutError, PlaywrightError):
-            return ""
+            pass
+        return ""
 
     @staticmethod
     def _extract_attribute(page: Page, selector: str, attribute: str) -> str:
@@ -115,7 +117,7 @@ class BusinessScraper:
             attribute: The name of the attribute to read.
 
         Returns:
-            The attribute value, or an empty string if not found.
+            The attribute value, or "" if not found.
         """
         try:
             locator = page.locator(selector).first
@@ -124,21 +126,33 @@ class BusinessScraper:
         except (PlaywrightTimeoutError, PlaywrightError):
             return ""
 
-    def _extract_attribute_or_text(self, page: Page, selector: str, attribute: str) -> str:
-        """Try extracting an attribute first, falling back to text content.
+    def _extract_by_aria_or_fallback(
+        self, page: Page, aria_pattern: re.Pattern[str], fallback_selector: str
+    ) -> str:
+        """Extract a button's aria-label by accessible name, with a fallback.
+
+        Tries a role-based lookup by accessible name pattern first (most
+        stable); falls back to a `data-item-id` CSS selector if that fails.
 
         Args:
             page: The Playwright Page to search within.
-            selector: The CSS selector to locate the element.
-            attribute: The attribute to prefer.
+            aria_pattern: Regex matching the expected accessible name prefix
+                (e.g. "^Address:").
+            fallback_selector: A `data-item-id`-based CSS selector to try
+                if the role-based lookup finds nothing.
 
         Returns:
-            The extracted value, or an empty string if neither is found.
+            The extracted aria-label text, or "" if neither approach works.
         """
-        value = self._extract_attribute(page, selector, attribute)
-        if value:
-            return value
-        return self._extract_text(page, selector)
+        try:
+            locator = page.get_by_role("button", name=aria_pattern).first
+            value = locator.get_attribute("aria-label", timeout=_FIELD_TIMEOUT_MS)
+            if value:
+                return value.strip()
+        except (PlaywrightTimeoutError, PlaywrightError):
+            pass
+
+        return self._extract_attribute(page, fallback_selector, "aria-label")
 
     @staticmethod
     def _clean_aria_label(raw_value: str) -> str:
@@ -152,11 +166,9 @@ class BusinessScraper:
         """
         if not raw_value:
             return ""
-
         for prefix in ("Address: ", "Phone: "):
             if raw_value.startswith(prefix):
                 return raw_value[len(prefix):].strip()
-
         return raw_value.strip()
 
     # ------------------------------------------------------------------
@@ -166,19 +178,15 @@ class BusinessScraper:
     def extract_email(self, website: str) -> str:
         """Attempt to find a contact email address for a business website.
 
-        Visits the homepage first; if no email is found, follows a small,
-        bounded set of likely contact/about pages (discovered from the
-        homepage's links, plus common path guesses) until an email is
-        found or the page limit is reached.
-
-        This method never raises: any network error, timeout, or parsing
-        issue simply results in an empty string being returned.
+        Visits the homepage first, then a bounded set of likely
+        contact/about pages, retrying each fetch on transient failures.
+        Never raises: any unresolved failure results in "".
 
         Args:
             website: The business website URL (may be empty).
 
         Returns:
-            The first valid email address found, or an empty string.
+            The first valid email address found, or "".
         """
         if not website:
             return ""
@@ -187,14 +195,14 @@ class BusinessScraper:
         if not normalized_url:
             return ""
 
-        homepage_html = self._fetch_page(normalized_url)
+        homepage_html = self._fetch_page_with_retries(normalized_url)
         if homepage_html:
             email = self.scan_page_for_email(homepage_html)
             if email:
                 return email
 
         for contact_url in self.find_contact_page(normalized_url, homepage_html):
-            html = self._fetch_page(contact_url)
+            html = self._fetch_page_with_retries(contact_url)
             if not html:
                 continue
             email = self.scan_page_for_email(html)
@@ -206,28 +214,18 @@ class BusinessScraper:
     def find_contact_page(self, base_url: str, homepage_html: str) -> list[str]:
         """Build a bounded list of candidate contact/about page URLs.
 
-        Combines links discovered on the homepage (whose href or link text
-        mentions "contact" or "about") with a fixed set of common path
-        guesses (e.g. "/contact", "/about-us"), deduplicated and capped by
-        `config.MAX_CONTACT_PAGES`.
-
         Args:
             base_url: The normalized website URL used to resolve relative links.
-            homepage_html: The homepage HTML (may be empty if the homepage
-                could not be fetched).
+            homepage_html: The homepage HTML (may be empty).
 
         Returns:
-            A list of absolute candidate URLs to check for an email address.
+            A list of absolute candidate URLs, capped by config.MAX_CONTACT_PAGES.
         """
-        candidates: list[str] = []
-
-        discovered_links = self._discover_contact_links(base_url, homepage_html)
-        candidates.extend(discovered_links)
+        candidates: list[str] = list(self._discover_contact_links(base_url, homepage_html))
 
         for path in _CANDIDATE_PATHS:
-            if not path:
-                continue
-            candidates.append(urljoin(base_url + "/", path))
+            if path:
+                candidates.append(urljoin(base_url + "/", path))
 
         deduped: list[str] = []
         seen: set[str] = set()
@@ -245,7 +243,7 @@ class BusinessScraper:
             html: The raw HTML content to search.
 
         Returns:
-            The first valid email address found, or an empty string.
+            The first valid email address found, or "".
         """
         if not html:
             return ""
@@ -256,9 +254,7 @@ class BusinessScraper:
         except Exception:
             text_content = html
 
-        candidates = _EMAIL_PATTERN.findall(text_content)
-
-        for candidate in candidates:
+        for candidate in _EMAIL_PATTERN.findall(text_content):
             cleaned = candidate.strip().rstrip(".,;:")
             if self.validate_email(cleaned):
                 return cleaned
@@ -275,9 +271,7 @@ class BusinessScraper:
         Returns:
             True if the string matches a standard email pattern.
         """
-        if not email:
-            return False
-        return bool(_EMAIL_FULLMATCH_PATTERN.match(email))
+        return bool(email) and bool(_EMAIL_FULLMATCH_PATTERN.match(email))
 
     def _discover_contact_links(self, base_url: str, homepage_html: str) -> list[str]:
         """Find homepage links whose href or text suggests a contact/about page.
@@ -287,7 +281,7 @@ class BusinessScraper:
             homepage_html: The homepage HTML to search (may be empty).
 
         Returns:
-            A list of absolute URLs discovered on the homepage.
+            A list of same-domain absolute URLs discovered on the homepage.
         """
         if not homepage_html:
             return []
@@ -298,7 +292,6 @@ class BusinessScraper:
             return []
 
         discovered: list[str] = []
-
         for anchor in soup.find_all("a", href=True):
             href = anchor.get("href", "")
             link_text = anchor.get_text(separator=" ").strip().lower()
@@ -314,9 +307,6 @@ class BusinessScraper:
     @staticmethod
     def _is_same_domain(base_url: str, candidate_url: str) -> bool:
         """Check whether a candidate URL belongs to the same domain as base_url.
-
-        Avoids following contact links that lead to unrelated third-party
-        domains (e.g. social media widgets).
 
         Args:
             base_url: The reference website URL.
@@ -338,46 +328,75 @@ class BusinessScraper:
             website: The raw website URL, possibly missing a scheme.
 
         Returns:
-            A normalized absolute URL, or an empty string if invalid.
+            A normalized absolute URL, or "" if invalid.
         """
         candidate = website.strip()
         if not candidate:
             return ""
-
         if not candidate.startswith(("http://", "https://")):
             candidate = f"https://{candidate}"
-
         try:
             parsed = urlparse(candidate)
             if not parsed.netloc:
                 return ""
         except ValueError:
             return ""
-
         return candidate
 
-    @staticmethod
-    def _fetch_page(url: str) -> str:
-        """Fetch a page's HTML content via a plain HTTP GET request.
-
-        Any network error, timeout, or non-success status code results in
-        an empty string rather than an exception.
+    def _fetch_page_with_retries(self, url: str) -> str:
+        """Fetch a page's HTML, retrying transient network failures.
 
         Args:
             url: The absolute URL to fetch.
 
         Returns:
-            The response HTML, or an empty string on failure.
+            The response HTML, or "" if every attempt failed.
         """
-        try:
-            response = requests.get(
+
+        def attempt() -> str:
+            return self._fetch_page(url)
+
+        def on_retry(attempt_number: int, exc: BaseException) -> None:
+            logger.warning(
+                "Website fetch failed for '%s' (attempt %d/%d): %s",
                 url,
-                headers=_REQUEST_HEADERS,
-                timeout=config.EMAIL_TIMEOUT,
-                allow_redirects=True,
+                attempt_number,
+                config.MAX_RETRIES,
+                exc,
             )
-            if response.status_code >= 400:
-                return ""
-            return response.text
+
+        try:
+            return retry(
+                attempt,
+                attempts=config.MAX_RETRIES,
+                wait_ms=config.RETRY_WAIT_MS,
+                exceptions=(requests.exceptions.RequestException,),
+                on_retry=on_retry,
+            )
         except requests.exceptions.RequestException:
+            logger.warning("Giving up on '%s' after %d attempts.", url, config.MAX_RETRIES)
             return ""
+
+    @staticmethod
+    def _fetch_page(url: str) -> str:
+        """Fetch a page's HTML content via a plain HTTP GET request.
+
+        Args:
+            url: The absolute URL to fetch.
+
+        Returns:
+            The response HTML.
+
+        Raises:
+            requests.exceptions.RequestException: On network failure or
+                timeout, so the caller's retry logic can act on it.
+        """
+        response = requests.get(
+            url,
+            headers=_REQUEST_HEADERS,
+            timeout=config.EMAIL_TIMEOUT,
+            allow_redirects=True,
+        )
+        if response.status_code >= 400:
+            return ""
+        return response.text
