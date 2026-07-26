@@ -271,6 +271,8 @@ class BrowserAgent:
         if self.page is None:
             raise RuntimeError("Browser has not been launched.")
 
+        previous_name = self._current_business_name()
+
         for attempt in range(3):
             try:
                 results = self.page.locator(RESULT_ITEM_SELECTOR)
@@ -291,9 +293,18 @@ class BrowserAgent:
                     timeout=5000,
                     force=True,
                 )
+            # Wait for the SAME element's text to actually differ from
+            # what it was before the click — wait_for_selector alone
+            # resolves instantly if the element already exists from the
+            # previously opened business, causing a stale read.
 
-                self.page.wait_for_selector(
-                    BUSINESS_NAME_SELECTOR,
+                self.page.wait_for_function(
+                    """([selector, previous]) => {
+                        const el = document.querySelector(selector);
+                        const text = el && el.textContent.trim();
+                        return !!text && text !== previous;
+                    }""",
+                    arg=[BUSINESS_NAME_SELECTOR, previous_name],
                     timeout=self.search_timeout,
                 )
 
@@ -304,6 +315,16 @@ class BrowserAgent:
                 self.page.wait_for_timeout(1000)
 
         return False
+
+    def _current_business_name(self) -> str:
+        """Snapshot the currently displayed business name, if any (empty before the first open)."""
+        if self.page is None:
+            return ""
+        try:
+            text = self.page.locator(BUSINESS_NAME_SELECTOR).first.text_content(timeout=1000)
+            return text.strip() if text else ""
+        except (PlaywrightTimeoutError, PlaywrightError):
+            return ""
 
     def close(self) -> None:
         """Close the browser and clean up Playwright resources.

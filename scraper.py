@@ -21,6 +21,7 @@ from playwright.sync_api import Error as PlaywrightError, Page, TimeoutError as 
 import config
 from models import Lead
 from utils import configure_logging, retry
+from browser import BUSINESS_NAME_SELECTOR
 
 logger = configure_logging()
 
@@ -93,16 +94,25 @@ class BusinessScraper:
     # ------------------------------------------------------------------
     @staticmethod
     def _extract_heading(page: Page) -> str:
-        print(page.url)
+        # Primary: the exact element open_result() already waited for.
+        try:
+            primary = page.locator(BUSINESS_NAME_SELECTOR).first
+            text = primary.text_content(timeout=_FIELD_TIMEOUT_MS)
+            if text and text.strip() and text.strip().lower() not in {"results", "sponsored"}:
+                return text.strip()
+        except (PlaywrightTimeoutError, PlaywrightError):
+            pass
+            # Fallback: role-based lookup, but only consider *visible* headings —
+            # the list panel's "Results" heading is often present but hidden.
         try:
             headings = page.get_by_role("heading", level=1)
-
             for i in range(headings.count()):
-                text = headings.nth(i).text_content(timeout=_FIELD_TIMEOUT_MS)
-
-                if text and text.strip() and text.strip().lower() != "results":
+                candidate = headings.nth(i)
+                if not candidate.is_visible():
+                    continue
+                text = candidate.text_content(timeout=_FIELD_TIMEOUT_MS)
+                if text and text.strip() and text.strip().lower() not in {"results", "sponsored"}:
                     return text.strip()
-
         except (PlaywrightTimeoutError, PlaywrightError):
             pass
         return ""
