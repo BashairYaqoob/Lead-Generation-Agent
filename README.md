@@ -1,23 +1,22 @@
 # AI Lead Generation Agent
 
 An AI-powered agent that accepts a natural language prompt (e.g. *"Find coffee
-shops in Karachi"*), extracts the business category and location, and — in
-later stages — will use browser automation to search a map/business listing
-website, scrape lead information, and export the results to an Excel file.
+shops in Karachi"*), extracts the business category and location, uses
+browser automation to search Google Maps, and collects visible business
+details. Email extraction and Excel export will be added in later stages.
 
-## Current Stage: Foundation & Architecture
+## Current Stage: Browser Automation (Playwright)
 
-This stage sets up the project's core architecture:
+This stage adds:
 
-- Data models (`SearchQuery`, `Lead`)
-- Configuration loading via `.env`
-- Rule-based prompt parsing (business type + location extraction)
-- Agent orchestration skeleton
-- CLI entry point
+- `browser.py` — `BrowserAgent`: launches Chromium, searches Google Maps,
+  scrolls to load multiple results, and opens each business's detail pane.
+- `scraper.py` — `BusinessScraper`: extracts business name, phone number,
+  website, and address from the open detail pane into a `Lead`.
+- Updated `agent.py` to orchestrate the full search → scrape workflow.
+- Updated `main.py` to print all collected leads.
 
-**Browser automation, web scraping, and Excel export are NOT implemented
-yet.** These will be added in the next development stage using Playwright,
-BeautifulSoup, and openpyxl.
+**Email extraction and Excel export are NOT implemented yet.**
 
 ## Folder Structure
 ```
@@ -27,8 +26,8 @@ lead-generation-agent/
 ├── parser.py # PromptParser: extracts business type + location
 ├── models.py # SearchQuery and Lead dataclasses
 ├── config.py # Environment variable configuration
-├── browser.py # Browser automation (stub, future stage)
-├── scraper.py # Business scraping (stub, future stage)
+├── browser.py # BrowserAgent: Playwright/Google Maps automation
+├── scraper.py # BusinessScraper: extracts lead details
 ├── excel_export.py # Excel export (stub, future stage)
 ├── utils.py # Generic helpers (filenames, logging, timestamps)
 ├── output/ # Generated Excel files will be saved here
@@ -69,7 +68,16 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 4. Configure environment variables
+### 4. Install Playwright's browser binaries
+
+```bash
+playwright install
+```
+
+This downloads the Chromium build Playwright uses; it's a one-time setup
+step separate from `pip install`.
+
+### 5. Configure environment variables
 
 Copy the example file and edit as needed:
 
@@ -77,8 +85,21 @@ Copy the example file and edit as needed:
 cp .env.example .env
 ```
 
-At this stage, the default values in `.env.example` are sufficient — no
-API key is required yet since the parser is rule-based.
+## Configuration
+
+| Variable        | Description                                              | Default |
+|-----------------|-----------------------------------------------------------|---------|
+| `HEADLESS`      | Run Chromium without a visible window (`true`/`false`)    | `true`  |
+| `MAX_LEADS`     | Maximum number of businesses to collect per search         | `20`    |
+| `SEARCH_TIMEOUT`| Timeout in milliseconds for page loads/selectors           | `15000` |
+
+To watch the browser while it works (useful for debugging selectors), set:
+
+HEADLESS=false
+
+To collect more or fewer leads per run, adjust:
+
+MAX_LEADS=10
 
 ## Running the Project
 
@@ -89,16 +110,28 @@ python main.py
 ```
 
 You will be prompted to enter a search query:
+
 Enter a search query, e.g. 'Find coffee shops in Karachi'
 
-coffee shops in Karachi
+Find coffee shops in Karachi
 
+The agent will:
 
-The agent will parse the prompt and print the extracted business type and
-location:
-Parsed Search Query
-Business Type : coffee shops
-Location : Karachi
+1. Parse the business type and location from your prompt.
+2. Launch Chromium and open Google Maps.
+3. Search for the business type + location.
+4. Scroll to load up to `MAX_LEADS` results.
+5. Open each result and extract its name, phone, website, and address.
+6. Print all collected leads.
+
+Example output:
+
+Found 10 businesses
+
+Business Name: ABC Coffee
+Phone: 021-xxxxxxx
+Website: https://example.com
+Location: Karachi, Pakistan
 
 ## Example Prompts
 
@@ -107,18 +140,20 @@ Location : Karachi
 - `Software houses in Lahore`
 - `Show me bakeries in New York`
 
+## Notes on Reliability
+
+Google Maps' HTML structure changes periodically, and its selectors
+(defined at the top of `browser.py` and `scraper.py`) may need updating if
+scraping stops working. Both modules are designed so any missing field
+degrades gracefully to an empty string rather than crashing the program.
+
 ## What's Next
 
-The following stages will build on this foundation:
-
-1. **Browser Automation** — Implement `browser.py` using Playwright to
-   navigate and search a map/business listing website (e.g. Google Maps or
-   Bing Maps).
-2. **Scraping** — Implement `scraper.py` to extract business name, phone
-   number, website, and (where possible) email address for each result.
-3. **Excel Export** — Implement `excel_export.py` to write all collected
-   leads to a `.xlsx` file in the `output/` directory, with columns for
-   Business Name, Email, Phone Number, Website, and Location.
-4. **Full Agent Workflow** — Wire everything together in `agent.run()` so
-   the CLI performs the complete search → scrape → export pipeline and
-   prints a final summary.
+1. **Email Extraction** — Visit each business's website (from the
+   `website` field) and search common pages (Home, Contact, About) for a
+   contact email address.
+2. **Excel Export** — Implement `excel_export.py` to write all collected
+   leads to a `.xlsx` file in `output/`, with columns for Business Name,
+   Email, Phone Number, Website, and Location.
+3. **Full Agent Workflow** — Wire Excel export into `agent.run()` and print
+   a final summary (search query, lead count, output file path).

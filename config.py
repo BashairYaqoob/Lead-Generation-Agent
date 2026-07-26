@@ -52,8 +52,12 @@ LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "none")
 API_KEY: str = os.getenv("API_KEY", "")
 MODEL: str = os.getenv("MODEL", "")
 
-# Browser automation configuration (used in a later stage).
+# Browser automation configuration.
 HEADLESS: bool = _get_bool("HEADLESS", True)
+
+# Maximum time (in milliseconds) to wait for browser actions/selectors
+# before treating the operation as failed/timed out.
+SEARCH_TIMEOUT: int = _get_int("SEARCH_TIMEOUT", 15000)
 
 # Lead collection configuration.
 MAX_LEADS: int = _get_int("MAX_LEADS", 20)
