@@ -20,7 +20,7 @@ yet.** These will be added in the next development stage using Playwright,
 BeautifulSoup, and openpyxl.
 
 ## Folder Structure
-
+```
 lead-generation-agent/
 ├── main.py # CLI entry point
 ├── agent.py # LeadGenerationAgent orchestration class
@@ -37,6 +37,7 @@ lead-generation-agent/
 ├── requirements.txt
 ├── .env.example
 └── .gitignore
+```
 
 ## Installation
 
