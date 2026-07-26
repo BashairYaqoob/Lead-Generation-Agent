@@ -62,5 +62,16 @@ SEARCH_TIMEOUT: int = _get_int("SEARCH_TIMEOUT", 15000)
 # Lead collection configuration.
 MAX_LEADS: int = _get_int("MAX_LEADS", 20)
 
-# Output configuration.
-OUTPUT_DIR: str = os.getenv("OUTPUT_DIR", "output")
+# Email extraction configuration.
+# EMAIL_TIMEOUT is in seconds (used with the `requests` library, unlike the
+# millisecond-based Playwright timeouts above).
+EMAIL_TIMEOUT: int = _get_int("EMAIL_TIMEOUT", 8)
+
+# Maximum number of additional contact/about-style pages to check per
+# website (beyond the homepage) when searching for an email address.
+MAX_CONTACT_PAGES: int = _get_int("MAX_CONTACT_PAGES", 4)
+
+# Output configuration. OUTPUT_DIRECTORY is the canonical name; OUTPUT_DIR
+# is kept as an alias for backward compatibility with earlier stages.
+OUTPUT_DIRECTORY: str = os.getenv("OUTPUT_DIRECTORY", os.getenv("OUTPUT_DIR", "output"))
+OUTPUT_DIR: str = OUTPUT_DIRECTORY

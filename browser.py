@@ -5,10 +5,17 @@ perform a search on Google Maps, progressively scroll the results panel to
 load multiple businesses, and open individual business listings so that
 `scraper.py` can extract their details from the resulting detail pane.
 
+`launch()` applies a realistic user agent and a light init script that
+masks `navigator.webdriver`, since Google Maps can behave differently for
+obviously-automated browsers. These are best-effort; if Maps still
+misbehaves, consider switching the target site (see README).
+
 Selectors are centralized as module-level constants since Google Maps'
 markup changes periodically; if scraping breaks, these are the first
 things to update.
 """
+
+import os
 
 from playwright.sync_api import (
     Browser,
@@ -21,9 +28,32 @@ from playwright.sync_api import (
 
 GOOGLE_MAPS_URL = "https://www.google.com/maps"
 
+# A realistic, current desktop Chrome user agent. Using Playwright's default
+# "HeadlessChrome"/automation-flavored UA makes bot detection trivial.
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+# NOTE: We intentionally do NOT pass "--start-maximized" here. Combining it
+# with an explicit context viewport causes Chromium to size the page
+# inconsistently, which can leave interactive elements (like the search
+# box) unstable or delayed. We rely on the explicit viewport below instead.
+_LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+]
+
+# Runs before any page script, masking the most obvious automation signal.
+_STEALTH_INIT_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+window.chrome = window.chrome || { runtime: {} };
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+"""
+
 # Search UI selectors.
-SEARCH_INPUT_SELECTOR = "input#searchboxinput"
-SEARCH_BUTTON_SELECTOR = "button#searchbox-searchbutton"
+SEARCH_INPUT_SELECTOR = 'input[role="combobox"]'
+SEARCH_BUTTON_SELECTOR = 'button#searchbox-searchbutton'
 
 # Results panel selectors.
 RESULTS_FEED_SELECTOR = 'div[role="feed"]'
@@ -32,12 +62,29 @@ RESULT_ITEM_SELECTOR = 'div[role="feed"] a.hfpxzc'
 # Selector used to confirm a business detail pane has loaded after a click.
 BUSINESS_NAME_SELECTOR = "h1.DUwDvf"
 
+# Google's cookie consent screen (consent.google.com) sometimes intercepts
+# the initial navigation on a fresh browser profile, before the Maps UI
+# loads. These selectors cover the common consent button labels/locales.
+_CONSENT_BUTTON_SELECTORS = [
+    'button:has-text("Accept all")',
+    'button:has-text("I agree")',
+    'button:has-text("Reject all")',
+    'form[action*="consent"] button',
+]
+
+# Short timeout used only to *check* whether a consent dialog is present.
+_CONSENT_CHECK_TIMEOUT_MS = 2500
+
 # Maximum number of consecutive scroll attempts that yield no new results
 # before we conclude no more businesses are available.
 _MAX_STAGNANT_SCROLLS = 3
 
 # Brief wait after each scroll to allow lazy-loaded results to render.
 _SCROLL_WAIT_MS = 1000
+
+# Directory where a diagnostic screenshot is saved if a search times out,
+# to make debugging selector/loading issues easier without guesswork.
+_DEBUG_DIR = "output/debug"
 
 
 class BrowserAgent:
@@ -70,15 +117,24 @@ class BrowserAgent:
         self.page: Page | None = None
 
     def launch(self) -> None:
-        """Launch Chromium and open a new page.
+        """Launch Chromium and open a new page with anti-detection tweaks.
 
         Raises:
             RuntimeError: If the browser fails to launch.
         """
         try:
             self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.launch(headless=self.headless)
-            context = self._browser.new_context()
+            self._browser = self._playwright.chromium.launch(
+                headless=self.headless,
+                args=_LAUNCH_ARGS,
+            )
+            context = self._browser.new_context(
+                locale="en-US",
+                user_agent=_USER_AGENT,
+                viewport={"width": 1366, "height": 850},
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+            )
+            context.add_init_script(_STEALTH_INIT_SCRIPT)
             self.page = context.new_page()
             self.page.set_default_timeout(self.search_timeout)
         except PlaywrightError as exc:
@@ -92,22 +148,73 @@ class BrowserAgent:
             search_query: The full search string, e.g. "coffee shops Karachi".
 
         Raises:
-            RuntimeError: If the browser has not been launched.
-            TimeoutError: If the search UI or results feed never appear.
+            RuntimeError: If the browser has not been launched, or if the
+                page/context/browser closed unexpectedly.
+            TimeoutError: If the search UI or results feed never appear
+                within the configured timeout.
         """
         if self.page is None:
             raise RuntimeError("Browser has not been launched. Call launch() first.")
 
         try:
-            self.page.goto(GOOGLE_MAPS_URL, timeout=self.search_timeout)
+            self.page.goto(GOOGLE_MAPS_URL, timeout=self.search_timeout, wait_until="domcontentloaded")
+            self._dismiss_consent_dialog()
             self.page.wait_for_selector(SEARCH_INPUT_SELECTOR, timeout=self.search_timeout)
-            self.page.fill(SEARCH_INPUT_SELECTOR, search_query)
-            self.page.click(SEARCH_BUTTON_SELECTOR)
+            self.search_box = self.page.locator('input[role="combobox"]').first
+            self.search_box.wait_for(state="visible")
+            self.search_box.fill(search_query)
+            self.search_box.press("Enter")
             self.page.wait_for_selector(RESULTS_FEED_SELECTOR, timeout=self.search_timeout)
         except PlaywrightTimeoutError as exc:
+            self._save_debug_screenshot("search_timeout")
             raise TimeoutError(
                 f"Timed out while searching Google Maps for '{search_query}': {exc}"
             ) from exc
+        except PlaywrightError as exc:
+            if "closed" in str(exc).lower():
+                raise RuntimeError(
+                    "The browser session closed unexpectedly while searching Google Maps."
+                ) from exc
+            raise RuntimeError(f"Browser error while searching Google Maps: {exc}") from exc
+
+    def _dismiss_consent_dialog(self) -> None:
+        """Dismiss Google's cookie consent dialog if it appears.
+
+        Checks briefly for common consent buttons and clicks the first one
+        found. If no dialog appears, does nothing. Never raises.
+        """
+        if self.page is None:
+            return
+
+        for selector in _CONSENT_BUTTON_SELECTORS:
+            try:
+                button = self.page.locator(selector).first
+                button.wait_for(state="visible", timeout=_CONSENT_CHECK_TIMEOUT_MS)
+                button.click(timeout=_CONSENT_CHECK_TIMEOUT_MS)
+                self.page.wait_for_load_state("domcontentloaded", timeout=self.search_timeout)
+                return
+            except (PlaywrightTimeoutError, PlaywrightError):
+                continue
+
+    def _save_debug_screenshot(self, label: str) -> None:
+        """Save a screenshot of the current page state, for debugging.
+
+        Never raises: any failure while saving is silently ignored, since
+        this is a best-effort diagnostic aid, not a core feature.
+
+        Args:
+            label: A short label used in the screenshot filename.
+        """
+        if self.page is None:
+            return
+
+        try:
+            os.makedirs(_DEBUG_DIR, exist_ok=True)
+            path = os.path.join(_DEBUG_DIR, f"{label}.png")
+            self.page.screenshot(path=path)
+            print(f"[debug] Saved screenshot to {path} (current URL: {self.page.url})")
+        except PlaywrightError:
+            pass
 
     def collect_businesses(self, max_results: int) -> int:
         """Scroll the results panel to load multiple business listings.
@@ -150,7 +257,6 @@ class BrowserAgent:
                     "el => el.scrollTop = el.scrollHeight"
                 )
             except PlaywrightError:
-                # Feed may not be scrollable (e.g. too few results); stop trying.
                 break
 
             self.page.wait_for_timeout(_SCROLL_WAIT_MS)

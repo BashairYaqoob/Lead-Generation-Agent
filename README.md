@@ -2,23 +2,28 @@
 
 An AI-powered agent that accepts a natural language prompt (e.g. *"Find coffee
 shops in Karachi"*), extracts the business category and location, uses
-browser automation to search Google Maps, and collects visible business
-details. Email extraction and Excel export will be added in later stages.
+browser automation to search Google Maps, scrapes business details, discovers
+contact emails, and exports everything to an Excel file.
 
-## Current Stage: Browser Automation (Playwright)
+## Features
 
-This stage adds:
+- **Natural language prompt parsing** — extracts business type and location
+  from prompts like `"Find coffee shops in Karachi"`.
+- **Browser automation** — Playwright-driven Chromium session, headless or
+  visible.
+- **Google Maps search** — searches and scrolls the results feed to collect
+  multiple businesses per run.
+- **Business scraping** — extracts business name, phone number, website, and
+  address from each result.
+- **Email extraction** — visits each business's website (homepage plus
+  contact/about pages) and searches for a contact email address using a
+  regular expression.
+- **Excel export** — saves all collected leads to a `.xlsx` file with
+  auto-sized columns.
+- **Error handling** — missing fields, unreachable websites, timeouts, or a
+  single failed business never stop the overall run.
 
-- `browser.py` — `BrowserAgent`: launches Chromium, searches Google Maps,
-  scrolls to load multiple results, and opens each business's detail pane.
-- `scraper.py` — `BusinessScraper`: extracts business name, phone number,
-  website, and address from the open detail pane into a `Lead`.
-- Updated `agent.py` to orchestrate the full search → scrape workflow.
-- Updated `main.py` to print all collected leads.
-
-**Email extraction and Excel export are NOT implemented yet.**
-
-## Folder Structure
+## Project Structure
 ```
 lead-generation-agent/
 ├── main.py # CLI entry point
@@ -74,12 +79,7 @@ pip install -r requirements.txt
 playwright install
 ```
 
-This downloads the Chromium build Playwright uses; it's a one-time setup
-step separate from `pip install`.
-
 ### 5. Configure environment variables
-
-Copy the example file and edit as needed:
 
 ```bash
 cp .env.example .env
@@ -87,51 +87,49 @@ cp .env.example .env
 
 ## Configuration
 
-| Variable        | Description                                              | Default |
-|-----------------|-----------------------------------------------------------|---------|
-| `HEADLESS`      | Run Chromium without a visible window (`true`/`false`)    | `true`  |
-| `MAX_LEADS`     | Maximum number of businesses to collect per search         | `20`    |
-| `SEARCH_TIMEOUT`| Timeout in milliseconds for page loads/selectors           | `15000` |
-
-To watch the browser while it works (useful for debugging selectors), set:
-
-HEADLESS=false
-
-To collect more or fewer leads per run, adjust:
-
-MAX_LEADS=10
+| Variable            | Description                                                   | Default  |
+|---------------------|-----------------------------------------------------------------|----------|
+| `HEADLESS`          | Run Chromium without a visible window (`true`/`false`)          | `true`   |
+| `MAX_LEADS`         | Maximum number of businesses to collect per search                | `20`     |
+| `SEARCH_TIMEOUT`    | Timeout in milliseconds for page loads/selectors                  | `15000`  |
+| `EMAIL_TIMEOUT`     | Timeout in seconds for each website request during email search   | `8`      |
+| `MAX_CONTACT_PAGES` | Max additional contact/about pages checked per website             | `4`      |
+| `OUTPUT_DIRECTORY`  | Folder where Excel files are saved                                 | `output` |
 
 ## Running the Project
-
-From the project root, run:
 
 ```bash
 python main.py
 ```
 
-You will be prompted to enter a search query:
-
+Enter a prompt when asked:
 Enter a search query, e.g. 'Find coffee shops in Karachi'
 
 Find coffee shops in Karachi
 
-The agent will:
 
-1. Parse the business type and location from your prompt.
-2. Launch Chromium and open Google Maps.
-3. Search for the business type + location.
-4. Scroll to load up to `MAX_LEADS` results.
-5. Open each result and extract its name, phone, website, and address.
-6. Print all collected leads.
+The agent will parse the prompt, search Google Maps, collect businesses,
+attempt to find each one's contact email, save an Excel file, and print a
+summary:
+```
+========================================
+Lead Generation Complete
+Search Query: Coffee Shops in Karachi
+Businesses Found: 18
+Emails Found: 11
+Excel File: output/leads_coffee_shops.xlsx
+```
+## Output
 
-Example output:
+Excel files are saved in the `output/` directory using the pattern:
+leads_<business_type>.xlsx
 
-Found 10 businesses
 
-Business Name: ABC Coffee
-Phone: 021-xxxxxxx
-Website: https://example.com
-Location: Karachi, Pakistan
+Examples: `leads_coffee_shops.xlsx`, `leads_dentists.xlsx`,
+`leads_software_houses.xlsx`.
+
+Each file contains one row per lead with the columns: **Business Name,
+Email, Phone Number, Website, Location**.
 
 ## Example Prompts
 
@@ -142,18 +140,30 @@ Location: Karachi, Pakistan
 
 ## Notes on Reliability
 
-Google Maps' HTML structure changes periodically, and its selectors
-(defined at the top of `browser.py` and `scraper.py`) may need updating if
-scraping stops working. Both modules are designed so any missing field
-degrades gracefully to an empty string rather than crashing the program.
+- Google Maps' HTML structure changes periodically; selectors are
+  centralized at the top of `browser.py` and `scraper.py` for easy updates.
+- Email discovery uses plain HTTP requests (not Playwright) against each
+  business's homepage plus a small, bounded set of contact/about pages, so
+  a slow or unreachable website never blocks the browser session.
+- Any missing field (email, phone, website, address) is left as an empty
+  string; a failure on one business is logged and skipped without stopping
+  the rest of the run.
 
-## What's Next
+## Assignment Requirements Checklist
 
-1. **Email Extraction** — Visit each business's website (from the
-   `website` field) and search common pages (Home, Contact, About) for a
-   contact email address.
-2. **Excel Export** — Implement `excel_export.py` to write all collected
-   leads to a `.xlsx` file in `output/`, with columns for Business Name,
-   Email, Phone Number, Website, and Location.
-3. **Full Agent Workflow** — Wire Excel export into `agent.run()` and print
-   a final summary (search query, lead count, output file path).
+| Requirement | Status | Where it's implemented |
+|---|---|---|
+| Accepts a natural-language prompt describing lead type + location | ✅ | `main.py` CLI input, `parser.py` |
+| Extracts business category and location from the prompt | ✅ | `PromptParser.parse()` in `parser.py` |
+| Uses browser automation on a map/business listing site | ✅ | `BrowserAgent` in `browser.py` (Playwright + Google Maps) |
+| Searches based on parsed category + location | ✅ | `LeadGenerationAgent.search_businesses()` in `agent.py` |
+| Collects business name, email, phone, website | ✅ | `BusinessScraper.scrape()` in `scraper.py` |
+| Collects multiple leads, not just one | ✅ | `BrowserAgent.collect_businesses()` scrolls to load up to `MAX_LEADS` results |
+| Missing fields left blank instead of crashing | ✅ | All extraction helpers in `scraper.py` return `""` on failure; never raise |
+| Leads saved into an `.xlsx` file | ✅ | `ExcelExporter.export()` in `excel_export.py` |
+| Excel file has clear columns (Business Name, Email, Phone Number, Website, Location) | ✅ | `_COLUMN_HEADERS` in `excel_export.py` |
+| Meaningful, sanitized filename | ✅ | `leads_<business_type>.xlsx` via `sanitize_filename()` in `utils.py`, used in `agent.py` |
+| Prints a clear summary (query, lead count, file path) | ✅ | `print_summary()` in `main.py` |
+| Runs without runtime errors given valid setup | ✅ | Errors caught at every stage (parsing, browser, scraping, email fetch, Excel save) |
+| README explains install, config, running, and output location | ✅ | This file |
+| Complete source code, no generated dependency folders submitted | ✅ | `.gitignore` excludes `venv/`, `node_modules/`, `.env` |
